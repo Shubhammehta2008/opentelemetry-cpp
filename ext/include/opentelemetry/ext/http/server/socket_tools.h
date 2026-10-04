@@ -173,14 +173,20 @@ struct SocketAddr
   /// SocketAddr constructor
   /// </summary>
   /// <returns>SocketAddr</returns>
-  SocketAddr() {}
+  SocketAddr()
+  {
+    std::memset(&m_data, 0, sizeof(m_data));
+  }
 
   SocketAddr(u_long addr, uint16_t port)
   {
-    sockaddr_in &inet4    = reinterpret_cast<sockaddr_in &>(m_data);
+    std::memset(&m_data, 0, sizeof(m_data));
+    sockaddr_in inet4{};
     inet4.sin_family      = AF_INET;
     inet4.sin_port        = htons(port);
     inet4.sin_addr.s_addr = htonl(addr);
+
+    std::memcpy(&m_data, &inet4, sizeof(inet4));
   }
 
   /// Parses an IPv4 address in "host" or "host:port" form. Host parsing follows the platform's
@@ -189,13 +195,16 @@ struct SocketAddr
   /// input leaves the address at AF_UNSPEC, for which port() returns -1.
   SocketAddr(char const *addr)
   {
+    std::memset(&m_data, 0, sizeof(m_data));
+
     if (addr == nullptr)
     {
       LOG_WARN("SocketAddr: cannot parse a null address");
       return;  // m_data is already AF_UNSPEC, so port() reports -1.
     }
 
-    sockaddr_in &parsed = reinterpret_cast<sockaddr_in &>(m_data);
+    sockaddr_in parsed{};
+    parsed.sin_family = AF_INET;
 
     char const *colon          = std::strchr(addr, ':');
     char const *hostEnd        = colon ? colon : addr + std::strlen(addr);
@@ -247,7 +256,7 @@ struct SocketAddr
 
     if (ok)
     {
-      parsed.sin_family = AF_INET;
+      std::memcpy(&m_data, &parsed, sizeof(parsed));
     }
     else
     {
@@ -257,9 +266,15 @@ struct SocketAddr
     }
   }
 
-  operator sockaddr *() { return reinterpret_cast<sockaddr *>(&m_data); }
+  sockaddr *addr() { return reinterpret_cast<sockaddr *>(&m_data); }
 
-  operator const sockaddr *() const { return reinterpret_cast<const sockaddr *>(&m_data); }
+  const sockaddr *addr() const { return reinterpret_cast<const sockaddr *>(&m_data); }
+
+  socklen_t addr_len() const { return sizeof(sockaddr_in); }
+
+  operator sockaddr *() { return addr(); }
+
+  operator const sockaddr *() const { return addr(); }
 
   int port() const
   {
@@ -267,7 +282,8 @@ struct SocketAddr
     switch (sa.sa_family)
     {
       case AF_INET: {
-        const sockaddr_in &inet4 = reinterpret_cast<const sockaddr_in &>(m_data);
+        sockaddr_in inet4{};
+        std::memcpy(&inet4, &m_data, sizeof(inet4));
         return ntohs(inet4.sin_port);
       }
 
@@ -284,7 +300,8 @@ struct SocketAddr
     switch (sa.sa_family)
     {
       case AF_INET: {
-        const sockaddr_in &inet4 = reinterpret_cast<const sockaddr_in &>(m_data);
+        sockaddr_in inet4{};
+        std::memcpy(&inet4, &m_data, sizeof(inet4));
         u_long addr = ntohl(inet4.sin_addr.s_addr);
         os << (addr >> 24) << '.' << ((addr >> 16) & 255) << '.' << ((addr >> 8) & 255) << '.'
            << (addr & 255);
@@ -299,17 +316,13 @@ struct SocketAddr
   }
 };
 
-// The parser memcpys a sockaddr_in into m_data, and the socket syscalls pass sizeof(SocketAddr)
-// as the address length. This wrapper is IPv4-only, so require sockaddr and sockaddr_in to have
-// the exact same size rather than trusting every ABI: passing an address length that is too large
-// for the family is a documented EINVAL for connect()/bind(). Exact equality also keeps the memcpy
-// safe. Together with the assertion below, sizeof(SocketAddr) == sizeof(sockaddr_in).
 static_assert(sizeof(sockaddr_storage) >= sizeof(sockaddr_in),
               "sockaddr_storage must be large enough to hold sockaddr_in");
 static_assert(offsetof(sockaddr_storage, ss_family) == offsetof(sockaddr_in, sin_family),
               "sockaddr_storage and sockaddr_in must place the address family at the same offset");
 static_assert(sizeof(SocketAddr) == sizeof(sockaddr_storage),
               "SocketAddr must add no storage beyond its sockaddr_storage");
+
 /// <summary>
 /// Encapsulation of a socket (non-exclusive ownership)
 /// </summary>
@@ -378,7 +391,7 @@ struct Socket
   bool connect(SocketAddr const &addr)
   {
     assert(m_sock != Invalid);
-    return (::connect(m_sock, addr, sizeof(addr)) == 0);
+    return (::connect(m_sock, addr.addr(), addr.addr_len()) == 0);
   }
 
   void close()
@@ -408,18 +421,18 @@ struct Socket
   bool bind(SocketAddr const &addr)
   {
     assert(m_sock != Invalid);
-    return (::bind(m_sock, addr, sizeof(addr)) == 0);
+    return (::bind(m_sock, addr.addr(), addr.addr_len()) == 0);
   }
 
   bool getsockname(SocketAddr &addr) const
   {
     assert(m_sock != Invalid);
 #ifdef _WIN32
-    int addrlen = sizeof(addr);
+    int addrlen = sizeof(addr.m_data);
 #else
-    socklen_t addrlen = sizeof(addr);
+    socklen_t addrlen = sizeof(addr.m_data);
 #endif
-    return (::getsockname(m_sock, addr, &addrlen) == 0);
+    return (::getsockname(m_sock, addr.addr(), &addrlen) == 0);
   }
 
   bool listen(int backlog)
@@ -432,11 +445,11 @@ struct Socket
   {
     assert(m_sock != Invalid);
 #ifdef _WIN32
-    int addrlen = sizeof(caddr);
+    int addrlen = sizeof(caddr.m_data);
 #else
-    socklen_t addrlen = sizeof(caddr);
+    socklen_t addrlen = sizeof(caddr.m_data);
 #endif
-    csock = ::accept(m_sock, caddr, &addrlen);
+    csock = ::accept(m_sock, caddr.addr(), &addrlen);
     return !csock.invalid();
   }
 
